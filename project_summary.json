@@ -1,0 +1,187 @@
+{
+  "project": {
+    "title": "Gesture-Controlled Music Stem Mixer",
+    "one_liner": "Live webcam hand-gesture control over a song's vocal/instrumental volume and EQ, using a self-trained gesture classifier on MediaPipe hand landmarks, mixing pre-separated Demucs stems in real time.",
+    "graded_contribution": "The trained gesture-landmark classifier: self-collected dataset, custom preprocessing, own MLP architecture, training pipeline, and evaluation. MediaPipe (hand tracking) and Demucs (stem separation) are explicitly pretrained, off-the-shelf components -- not the contribution.",
+    "not_using": "Spotify Web Playback SDK -- audio is DRM-protected, raw PCM never exposed. Local audio files only (mp3/wav via file picker)."
+  },
+
+  "pretrained_components": {
+    "mediapipe_hands": {
+      "role": "Detects up to 2 hands per frame, outputs 21 (x, y) landmark points per hand in pixel coordinates. Off-the-shelf, not trained or fine-tuned by us.",
+      "version": "mediapipe==0.10.21 (legacy Solutions API -- pinned below 1.0.0, which removed mp.solutions in favor of the newer Tasks API)"
+    },
+    "demucs": {
+      "role": "Source separation: splits a full song into vocals.wav and no_vocals.wav (instrumental) stems. Off-the-shelf pretrained model (htdemucs), not trained by us.",
+      "version": "demucs==4.1.0, model=htdemucs, invoked as `demucs --two-stems=vocals`",
+      "performance_note": "CPU: ~2.2x song length to separate (measured: 3m5s song -> 6m51s). GPU (CUDA, RTX 3050): ~20x faster than CPU (same song -> 20.6s). Separation results are cached on disk per song so repeat plays are instant."
+    }
+  },
+
+  "the_trained_classifier": {
+    "what_it_is": "A custom MLP that classifies a single hand's pose from its 21 MediaPipe landmarks into one of 7 gesture classes.",
+    "dataset": {
+      "collection_method": "Self-recorded via a modified version of the base repo's app.py: press a class number to arm continuous per-frame logging of that class (originally hold-to-record, later changed to a tap-to-toggle latch so recording doesn't depend on OS key-repeat timing), varying hand, angle, distance, and lighting across takes.",
+      "final_sample_counts": {
+        "pinch_open": 3499,
+        "pinch_closed": 1211,
+        "neutral": 3709,
+        "one": 1609,
+        "two": 1881,
+        "three": 1782,
+        "stop_play": 917,
+        "total": 14608
+      },
+      "class_meanings": {
+        "pinch_open": "thumb+index far apart",
+        "pinch_closed": "thumb+index touching",
+        "neutral": "relaxed/resting hand -- also absorbs undefined shapes like a closed fist or thumbs-up so they don't get misread as a real command",
+        "one": "index finger only extended -- mode-select: Music Player Controls",
+        "two": "index+middle extended (peace sign) -- mode-select: Vocals & Instrumental",
+        "three": "index+middle+ring extended -- mode-select: Bass & Treble",
+        "stop_play": "flat palm facing camera, fingers extended AND held together (classic 'stop sign') -- universal play/pause, works in any mode"
+      },
+      "notable_iteration": "stop_play was first defined as an open hand with fingers SPREAD apart, which overlapped heavily with pinch_open in landmark space (recall only 0.43, precision 0.62) and dragged down overall accuracy to 89.1%. Redefining it as fingers held TOGETHER (classic stop-sign) fixed the overlap: recall rose to 0.98, precision to 0.86, and overall accuracy recovered to 95.4%. Good example of a data/label-design fix outperforming more data of the same (broken) definition."
+    },
+    "preprocessing": {
+      "steps": [
+        "1. Subtract the wrist landmark (index 0) from all 21 landmarks -> translation invariant (hand position in frame doesn't matter)",
+        "2. Divide all 42 resulting values by their own max absolute value -> scale invariant (distance from camera doesn't matter)",
+        "3. Flatten to a 42-length feature vector (21 landmarks x 2 coords)"
+      ],
+      "why": "Raw pixel coordinates encode irrelevant variance (where in frame, how close to camera); normalizing removes that so the model can focus on hand shape, the actual signal."
+    },
+    "architecture": {
+      "type": "Feedforward MLP (Keras Sequential)",
+      "layers": "Input(42) -> Dropout(0.2) -> Dense(128, relu) -> Dropout(0.4) -> Dense(64, relu) -> Dense(7, softmax)",
+      "parameters": 14150,
+      "loss": "sparse_categorical_crossentropy",
+      "optimizer": "Adam",
+      "regularization": "Dropout at two points specifically to fight overfitting on a dataset this size"
+    },
+    "training_config": {
+      "split": "70% train / 15% validation / 15% test, stratified by class",
+      "batch_size": 128,
+      "max_epochs": 1000,
+      "early_stopping": "patience=20 on validation loss",
+      "train_val_test_counts": { "train": 10225, "val": 2191, "test": 2192 }
+    },
+    "final_evaluation": {
+      "test_accuracy": 0.9544,
+      "test_loss": 0.1642,
+      "per_class": {
+        "pinch_open":   { "precision": 0.96, "recall": 1.00, "f1": 0.98, "support": 525 },
+        "pinch_closed": { "precision": 0.99, "recall": 0.76, "f1": 0.86, "support": 181 },
+        "neutral":      { "precision": 0.99, "recall": 0.94, "f1": 0.96, "support": 557 },
+        "one":          { "precision": 0.85, "recall": 1.00, "f1": 0.92, "support": 242 },
+        "two":          { "precision": 0.99, "recall": 0.96, "f1": 0.97, "support": 282 },
+        "three":        { "precision": 0.98, "recall": 0.98, "f1": 0.98, "support": 268 },
+        "stop_play":    { "precision": 0.86, "recall": 0.98, "f1": 0.91, "support": 137 }
+      },
+      "confusion_matrix": {
+        "labels_order": ["pinch_open", "pinch_closed", "neutral", "one", "two", "three", "stop_play"],
+        "rows_are_true_cols_are_predicted": [
+          [525, 0, 0, 0, 0, 0, 0],
+          [18, 137, 0, 26, 0, 0, 0],
+          [3, 1, 522, 7, 3, 1, 20],
+          [0, 0, 0, 242, 0, 0, 0],
+          [0, 0, 0, 8, 270, 3, 1],
+          [1, 0, 1, 2, 1, 262, 1],
+          [0, 0, 3, 0, 0, 0, 134]
+        ]
+      },
+      "failure_analysis": [
+        "pinch_closed -> one: 26 samples confused. Both involve a partially curled hand with the index finger relatively prominent; overlap is the main remaining weak point (recall 0.76 for pinch_closed).",
+        "neutral -> stop_play: 20 samples confused. Both are 'open hand facing camera' at a coarse level; fine-grained finger-together-vs-relaxed distinction is the residual ambiguity.",
+        "one's precision (0.85) is the lowest precision score -- it absorbs some misclassifications from neighboring classes (pinch_closed, stop_play) rather than being confused with something else itself."
+      ]
+    },
+    "export": "Converted to TensorFlow Lite with default post-training quantization (tf.lite.TFLiteConverter, Optimize.DEFAULT) for fast per-frame inference in the live app."
+  },
+
+  "abandoned_approach_ablation": {
+    "what_was_tried": "A second classifier (point_history_classifier) on a 16-frame trajectory of the thumb tip, to detect clockwise/counterclockwise rotation for a 'volume knob' gesture.",
+    "why_it_failed": [
+      "Initial slow, deliberate circular motion: CW/CCW were statistically indistinguishable (raw single-frame signed-area separation, mean/std ratio ~0.11 for clockwise) -- 62-66% accuracy on a 4-class problem, both plain MLP and LSTM architectures plateaued at the same level, confirming it was a data/signal problem, not a model-capacity problem.",
+      "Faster, more deliberate motion improved raw signal ~20-40x (validated via a geometric signed-area sanity check before retraining) and got a 2-class CW/CCW diagnostic model to 77.8% balanced accuracy -- workable but not reliable enough for continuous control.",
+      "Even after that improvement, live testing showed inconsistent left/right hand behavior and rotation direction being fundamentally hard to execute/detect reliably, especially since MediaPipe's hand tracking itself degrades during the fast motion the gesture requires (motion blur), i.e. fighting the tracker's own limitations."
+    ],
+    "resolution": "Rotation-based control was dropped entirely for live use. Replaced with two purely geometric (untrained, deterministic) mappings instead: pinch-distance ratio (thumb-to-index / hand-scale) for continuous 0-1 volume, and a single-frame wrist-to-thumb-tip tilt angle for continuous -5..+5 EQ boost/cut. Both are static per-frame measurements rather than motion trajectories, which sidesteps the tracking-during-motion problem entirely and requires no training data.",
+    "why_this_belongs_in_the_report": "Demonstrates a full methodology cycle: hypothesis -> data collection -> two architectures tried -> root-cause diagnosis (via a geometric ground-truth sanity check, not just retrying) -> informed decision to replace ML with a simpler, more reliable deterministic method where the geometry genuinely didn't need learning. Good ablation/discussion material, not a hidden failure."
+  },
+
+  "functionality": {
+    "modes": {
+      "mode_select_mechanism": "Hold a mode-select pose (one/two/three) for ~1s; a majority-vote window (needs 60%+ agreement over ~20 frames) confirms the switch, tolerating an occasional misclassified frame instead of resetting on any single flicker.",
+      "vocals_and_instrumental": {
+        "trigger_pose": "two",
+        "control": "Continuous thumb-index pinch distance per hand (left=vocals, right=instrumental), directly mapped 0-1, no classifier involved in the control itself -- pure geometry.",
+        "gated_to": "Only updates when that hand's pose is pinch_open, pinch_closed, or neutral -- ignores mode-select/stop_play poses so switching gestures doesn't bleed into the gain."
+      },
+      "bass_and_treble": {
+        "trigger_pose": "three",
+        "control": "Wrist-to-thumb-tip tilt angle per hand (left=bass, right=treble), a single-frame static angle (not a motion trajectory), mapped to -5 (cut) .. +5 (boost) around a thumb-up = 0 neutral reference. Drives real low-shelf (150Hz) / high-shelf (4000Hz) biquad EQ filters (RBJ Audio EQ Cookbook formulas) applied to the mixed output, up to +-12dB.",
+        "gated_to": "Only updates when that hand's pose is classified as neutral (the thumbs-up/relaxed shape) -- exclusive to that pose so other hand shapes don't move the EQ."
+      },
+      "music_player": {
+        "trigger_pose": "one",
+        "control": "Not finalized -- an initial fast-swipe ('shooing') gesture attempt failed because MediaPipe's tracking degrades during the fast motion the gesture itself requires (motion blur), same root issue as the abandoned rotation classifier."
+      }
+    },
+    "universal_gestures": {
+      "note": "Work in any mode, detected independent of the mode-select state machine.",
+      "stop_play": "Trained classifier pose (see above), majority-vote tolerant hold (~2.3-2.5s) plus a wall-clock cooldown (2s) after firing so relaxing out of the pose doesn't immediately re-trigger.",
+      "add_song": "'Absolute Cinema' pose: geometric, not trained -- requires (a) wrist-to-wrist distance > 6x average hand scale AND (b) both hands classified as open/spread (fingers extended and apart), so raising both hands to do bass/treble tilting doesn't accidentally trigger it. Opens a native file picker (tkinter), defaulting to a Songs/ folder; any newly picked song is copied into that folder and separated once, then cached for instant reload."
+    },
+    "audio_engine": {
+      "mixing": "sounddevice OutputStream callback mixes vocals.wav + no_vocals.wav with independently smoothed gains (exponential smoothing per audio block to avoid clicks from gesture jitter).",
+      "eq": "Real low-shelf/high-shelf biquad filters (scipy.signal.lfilter, RBJ cookbook coefficients), recomputed each audio block from the smoothed dB target, filter state (zi) carried across blocks per channel for click-free continuity.",
+      "transport": "play/pause via stopping/starting the actual audio stream in place (position preserved); seek() adjusts playback position directly, clamped to track bounds.",
+      "threading": "Camera/gesture loop and audio callback run on separate threads; only two floats (target gains) and two floats (target EQ) cross between them, guarded by a lock. No heavy computation inside the audio callback itself."
+    },
+    "ui": "OpenCV overlay: translucent HUD bars, live gain bars (0-1) for vocals/instrumental, centered bars (-5..+5) for bass/treble, song name + play state + elapsed/total time, mode indicator, persistent on-screen gesture legend, and a toggleable (`d` key) debug readout of raw geometric values for live calibration."
+  },
+
+  "libraries_used": {
+    "mediapipe": { "version": "0.10.21", "purpose": "Pretrained hand landmark detection (21 points x 2 hands)" },
+    "tensorflow": { "version": "2.17.1", "purpose": "Training and running the custom MLP classifier; TFLite export/inference" },
+    "opencv-python": { "version": "4.11.0.86", "purpose": "Webcam capture, drawing the UI/HUD overlay, keyboard input for the data-logging tool" },
+    "numpy": { "version": "1.26.4", "purpose": "Landmark preprocessing, geometric calculations (pinch ratio, tilt angle, wrist distance)" },
+    "scikit-learn": { "version": "1.9.1", "purpose": "train_test_split, confusion_matrix, classification_report for evaluation" },
+    "pandas": { "version": "3.0.6", "purpose": "Confusion matrix display formatting" },
+    "matplotlib": { "version": "3.11.2", "purpose": "Confusion matrix plotting in the training notebook" },
+    "seaborn": { "version": "0.13.2", "purpose": "Confusion matrix heatmap styling" },
+    "scipy": { "version": "1.17.1", "purpose": "Bass/treble shelf-filter biquad coefficients and real-time filtering (signal.lfilter)" },
+    "sounddevice": { "version": "0.5.6", "purpose": "Real-time low-latency audio output stream for the live mixer" },
+    "soundfile": { "version": "0.14.0", "purpose": "Reading the separated vocals.wav / no_vocals.wav stem files" },
+    "demucs": { "version": "4.1.0", "purpose": "Pretrained source separation (song -> vocals + instrumental)" },
+    "torch": { "version": "2.14.0+cu126", "purpose": "Backend for Demucs; CUDA build used for GPU-accelerated separation (~20x faster than CPU)" },
+    "tkinter": { "version": "stdlib", "purpose": "Native file picker for song selection, no extra dependency" }
+  },
+
+  "deep_learning_techniques_used": [
+    "Supervised multi-class classification (custom MLP, not a pretrained/fine-tuned network)",
+    "Feature engineering / preprocessing for translation and scale invariance on landmark coordinates",
+    "Dropout regularization to control overfitting on a moderately sized self-collected dataset",
+    "Stratified train/validation/test split methodology",
+    "Early stopping on validation loss",
+    "Post-training quantization (TFLite) for efficient real-time CPU inference",
+    "Ablation methodology: a second architecture (LSTM) tried for a different sub-problem (rotation direction), compared against a plain MLP, both evaluated against a geometric ground-truth baseline to diagnose whether the limitation was model capacity or data/signal quality",
+    "Confusion-matrix-driven iterative dataset design (identifying a class-overlap problem, redefining the class's pose definition, and re-validating rather than just adding more data of the same definition)"
+  ],
+
+  "abstract_and_report_checklist": [
+    "Self-collected dataset description: 7 classes, ~14.6k samples, collection methodology (webcam, varied angle/distance/lighting, tap-to-arm continuous logging), contributor notes",
+    "Train/val/test split ratios (70/15/15, stratified)",
+    "Preprocessing justification (wrist-relative translation + max-abs scale normalization, and why: removes irrelevant variance)",
+    "Architecture description (42 -> 128 -> 64 -> 7 MLP, dropout placement, param count)",
+    "Training curve / early-stopping behavior",
+    "Final accuracy, full confusion matrix, per-class precision/recall/F1",
+    "Failure analysis: pinch_closed/one overlap, neutral/stop_play overlap, and the earlier stop_play pose-redefinition story as a worked example of diagnosing and fixing a class-overlap problem",
+    "Ablation: the abandoned rotation classifier -- MLP vs LSTM vs geometric ground-truth comparison, and why a deterministic geometric method replaced it in the final system",
+    "Explicit statement that MediaPipe and Demucs are pretrained components; the trained MLP classifier is the original contribution",
+    "System-level description: mode state machine, universal gestures, real-time audio engine (mixing + EQ), threading model",
+    "Performance note: GPU vs CPU separation benchmark (20x speedup) as a practical engineering result worth mentioning",
+    "Limitations: Demucs stem bleed (imperfect separation, inherent to the pretrained model, not the classifier), Player-mode controls not finalized, bass/treble neutral-point calibration is per-user"
+  ]
+}
