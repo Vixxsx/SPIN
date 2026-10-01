@@ -1,4 +1,4 @@
-# JAM — Joint Action Mixer
+# SPIN — Sign-driven Player & INstrumental mixer
 
 Live, webcam-driven hand-gesture control over a song's vocals and instrumental — volume, EQ, playback — using a self-trained hand-pose classifier running on top of pretrained hand/face tracking, mixing pre-separated stems in real time.
 
